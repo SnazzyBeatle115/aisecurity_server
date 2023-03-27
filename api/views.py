@@ -15,6 +15,171 @@ import os
 import pytz as tz
 from . import IN_MORNING_MODE
 
+from django.shortcuts import render
+
+from rest_framework.response import Response
+from rest_framework.decorators import api_view
+from rest_framework.views import APIView
+from django.core.files.storage import default_storage
+
+from pyzbar.pyzbar import decode
+import pymongo
+
+
+from .workingAiClean import *
+# from .barcodeScanner import *
+from .dbname import *
+
+import time, datetime, os
+
+
+# Define global vars
+package_id = 0
+# print(int(datetime.datetime.fromtimestamp(time.time()).strftime('%M')))
+prev_date = int(datetime.datetime.fromtimestamp(time.time()).strftime('%d')) - 1
+current_img_dir = str(datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M'))
+# Available times '%Y-%m-%d %H:%M:%S'
+
+# * Load the database encodings
+client = pymongo.MongoClient('mongodb://localhost:27017/')
+table = client["kiosk"]
+collection = table[db]
+
+data = collection.find()
+
+database = {}
+
+for doc in data:
+    database[doc['_id']] = doc
+
+# database["Musk"] = getTestImage("api/Images/mrmusk3.jpg")
+# database["David"] = getTestImage("api/Images/Unknown1.jpg")
+
+
+"""
+postImages(request) -> gets the post 
+from the app on the kiosk and stores the images based on the time and date
+format is "kiosk#/year-month-day_hour-min/packageid_sec_unix/" then it tries 
+to run facial detection on the images
+"""
+@api_view(['POST'])
+def postImages(request):    
+    
+    global package_id, prev_date, current_img_dir
+
+    # * Attempt to store the images
+    try:
+        # * Get the images from the post
+        data = request.data
+        print("-----------------------------")
+        print(request)
+        print("data", data.keys(), type(data.keys()))
+        print("items", str(list(data.items())))
+        print("values", str(list(data.values())))
+        print("image", str(next(data.items())).split("File: ")[1].split(" ")[0])
+
+        print("has face?", "Face" in str(next(data.items())))
+        print("has bar?", "Barcode" in str(next(data.items())))
+        if "Barcode" in str(next(data.items())):
+            for _ in range(4):
+                print("BARCODE DETECTED")
+
+
+        # * Block empty package
+        if len(list(data.keys())) == 0:
+            print("Empty Package")
+            return Response("Empty Package")
+
+        # * Block incoming package if it is too old
+        if (int(list(data.keys())[0].split("-")[1]) + 7 < time.time()):
+            print("Blocked", data.keys(), " Difference in times: ", time.time() - int(list(data.keys())[0].split("-")[1]))
+            return Response("Blocked Package")
+
+        # * Check if we need to update the current directory where we are storing images
+        current_date = int(datetime.datetime.fromtimestamp(time.time()).strftime('%d'))
+        if current_date > prev_date: 
+            prev_date = current_date
+            current_img_dir = str(datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H-%M'))
+            new_path = os.getcwd() + "/api/Images/" + list(data.keys())[0].split("-")[0] + "/" + current_img_dir
+            # * Create the new directory
+            if not os.path.exists(new_path):
+                os.mkdir(new_path)
+
+        recieve_time = datetime.datetime.fromtimestamp(time.time()).strftime('%S')
+
+        face_image_paths = []
+        bar_image_paths = []
+        
+        uniqueID = 0
+        # * Go through all image keys in dictionary
+        for t in data.items():
+            i, img = t
+            imgName = str(img)
+            print("DEBUG", imgName)
+
+            # * Open new image file
+            curr_time = str(round(time.time()))
+            destination = f"api/Images/{i.split('-')[0]}/{current_img_dir}/{package_id}_{recieve_time}_{curr_time}_{imgName}_{uniqueID}.jpg"
+            if "Barcode" in imgName:
+                bar_image_paths.append(destination)
+            else:
+                face_image_paths.append(destination)
+            
+            with open(destination, "wb") as binary_file:
+                # * Write image bytes to file
+                binary_file.write(img.file.read())
+            uniqueID += 1
+
+        package_id += 1
+        
+        returnID = -1
+        # * Barcode Detection
+        if len(bar_image_paths) != 0:
+            returnID = readMultipleBarcodes(bar_image_paths)
+            print("Barcode ID: ", returnID)
+
+        if returnID == -1 and len(face_image_paths) != 0:
+            # * Face detection
+            returnID = recognize_face(face_image_paths, database)
+            print("Face ID: ", returnID)
+
+        print("FINAL ID: ", returnID)
+        with open('outs.txt', 'a') as f:
+            f.write(f"{returnID} was detected at {str(datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H-%M-%S'))}\n")
+
+        return Response(returnID[0])
+        # return Response(f"{returnID}")
+    except Exception as e:
+        print(e)
+        with open('errors.txt', 'a') as f:
+            f.write(f"ERROR: {e}\n" +
+                    f"Date: {str(datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H-%M-%S'))}\n")
+            f.write(f"Request: {request}\n"+
+                    f"Request Data: {request.data}\n"+
+                    f"Request Items: {list(request.data.items())}\n\n")
+        # * Return the exception if the code errors
+        return Response(str(e))
+
+
+
+@api_view(['POST'])
+def postID(request):
+    try:
+        print("request:",request.data,request.data.items())
+        studentID = request.data["studentID"]
+        print("id:",studentID)
+        # serializer = StudentIDSerializer(data={"accept":True})
+
+        # if serializer.is_valid():
+        #     serializer.save()
+        hasSeniorPriv = True
+
+        return Response({"accept":hasSeniorPriv})
+    except Exception as e:
+        print(e)
+        # * Return the exception if the code errors
+        return Response(str(e))
+
 
 # idk if this is done right, just change it if it isn't
 def IndexWebApp(request):
